@@ -1,15 +1,18 @@
-"""Thin Anthropic client wrapper used by the LLM-backed pipeline stages.
+"""Vendor-neutral LLM client used by the LLM-backed pipeline stages.
+
+`LLMClient` is a thin facade over a pluggable :mod:`providers` backend
+(Anthropic, OpenAI, or Gemini). One place knows about model ids, effort, and
+structured outputs; the rest of the codebase stays SDK-agnostic and never
+imports a vendor library.
 
 Design goals:
-  * One place that knows about model ids, effort, adaptive thinking, and
-    structured outputs — so the rest of the codebase stays SDK-agnostic.
-  * Graceful OFFLINE mode: with no ANTHROPIC_API_KEY, every call returns a
-    deterministic, schema-valid stub. This keeps `ingest`/`analyze`/`generate`
-    runnable in CI and in tests without network or spend, which is exactly the
+  * **Provider-agnostic.** Set ``ANTHROPIC_API_KEY``, ``OPENAI_API_KEY``, or
+    ``GOOGLE_API_KEY`` (or pin one with ``AGENTIC_EVAL_PROVIDER``) and the same
+    pipeline runs unchanged.
+  * **Graceful OFFLINE mode.** With no credentials, every call returns a
+    deterministic, schema-valid stub. This keeps ``ingest``/``analyze``/
+    ``generate`` runnable in CI and tests without network or spend — exactly the
     property you want from an eval framework (reproducibility first).
-
-We default to Claude Opus 4.8 (`claude-opus-4-8`) with adaptive thinking and
-`effort` controlled via `output_config`, per the current Anthropic API.
 """
 
 from __future__ import annotations
@@ -19,39 +22,50 @@ from typing import TypeVar
 
 from pydantic import BaseModel
 
-DEFAULT_MODEL = os.environ.get("AGENTIC_EVAL_MODEL", "claude-opus-4-8")
-DEFAULT_JUDGE_MODEL = os.environ.get("AGENTIC_EVAL_JUDGE_MODEL", "claude-opus-4-8")
+from .providers import DEFAULT_MODELS, ModelConfig, resolve_provider
+
+# Optional explicit overrides. When unset, each provider's own default is used.
+DEFAULT_MODEL = os.environ.get("AGENTIC_EVAL_MODEL")
+DEFAULT_JUDGE_MODEL = os.environ.get("AGENTIC_EVAL_JUDGE_MODEL")
 DEFAULT_EFFORT = os.environ.get("AGENTIC_EVAL_EFFORT", "high")
 
 T = TypeVar("T", bound=BaseModel)
 
 
 class LLMClient:
-    """Wraps the Anthropic SDK with structured-output and text helpers."""
+    """Provider-agnostic structured-output + text client.
+
+    Args:
+        provider: ``"anthropic"`` | ``"openai"`` | ``"gemini"`` | ``"offline"``.
+            Defaults to ``AGENTIC_EVAL_PROVIDER`` or auto-detection by API key.
+        model: Generation model id. Defaults to the provider's default model.
+        judge_model: Model id used for LLM-as-judge grading (defaults to ``model``).
+        effort: Reasoning effort where the provider supports it.
+        api_key: Explicit key. Pass ``""`` to force offline mode.
+    """
 
     def __init__(
         self,
-        model: str = DEFAULT_MODEL,
-        judge_model: str = DEFAULT_JUDGE_MODEL,
+        model: str | None = None,
+        judge_model: str | None = None,
         effort: str = DEFAULT_EFFORT,
         api_key: str | None = None,
+        *,
+        provider: str | None = None,
     ) -> None:
-        self.model = model
-        self.judge_model = judge_model
+        self._provider = resolve_provider(provider, api_key=api_key)
+        default_model = DEFAULT_MODELS.get(self._provider.name, "offline")
+        self.model = model or DEFAULT_MODEL or default_model
+        self.judge_model = judge_model or DEFAULT_JUDGE_MODEL or self.model
         self.effort = effort
-        self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-        self._client = None
-        if self._api_key:
-            try:
-                import anthropic
-
-                self._client = anthropic.Anthropic(api_key=self._api_key)
-            except Exception:  # pragma: no cover - import/credential issues -> offline
-                self._client = None
 
     @property
     def online(self) -> bool:
-        return self._client is not None
+        return self._provider.available
+
+    @property
+    def provider_name(self) -> str:
+        return self._provider.name
 
     # ------------------------------------------------------------------ #
     # Structured output
@@ -65,30 +79,31 @@ class LLMClient:
         user: str,
         model: str | None = None,
         max_tokens: int = 8000,
+        temperature: float = 0.0,
     ) -> T:
-        """Return an instance of `schema` populated by the model.
+        """Return an instance of ``schema`` populated by the model.
 
-        Offline, returns `schema()`-with-defaults so callers must design schemas
-        that are still meaningful when empty (they are: lists default to []).
+        Offline (or on any provider failure) returns ``schema``-with-defaults, so
+        callers must design schemas that are meaningful when empty (lists default
+        to ``[]``). This is what lets every stage fall back deterministically.
         """
         if not self.online:
             return self._offline_stub(schema)
 
-        try:
-            resp = self._client.messages.parse(  # type: ignore[union-attr]
-                model=model or self.model,
-                max_tokens=max_tokens,
-                thinking={"type": "adaptive"},
-                output_config={"effort": self.effort},
-                system=system,
-                messages=[{"role": "user", "content": user}],
-                output_format=schema,
-            )
-            parsed = getattr(resp, "parsed_output", None)
-            if isinstance(parsed, schema):
-                return parsed
+        config = ModelConfig(
+            model=model or self.model,
+            effort=self.effort,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        data = self._provider.parse_json(
+            system=system, user=user, schema=schema.model_json_schema(), config=config
+        )
+        if data is None:
             return self._offline_stub(schema)
-        except Exception:  # pragma: no cover - any API failure degrades to stub
+        try:
+            return schema.model_validate(data)
+        except Exception:
             return self._offline_stub(schema)
 
     def complete(
@@ -98,21 +113,17 @@ class LLMClient:
         user: str,
         model: str | None = None,
         max_tokens: int = 4000,
+        temperature: float = 0.0,
     ) -> str:
         if not self.online:
             return ""
-        try:
-            resp = self._client.messages.create(  # type: ignore[union-attr]
-                model=model or self.model,
-                max_tokens=max_tokens,
-                thinking={"type": "adaptive"},
-                output_config={"effort": self.effort},
-                system=system,
-                messages=[{"role": "user", "content": user}],
-            )
-            return "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
-        except Exception:  # pragma: no cover
-            return ""
+        config = ModelConfig(
+            model=model or self.model,
+            effort=self.effort,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        return self._provider.complete_text(system=system, user=user, config=config)
 
     # ------------------------------------------------------------------ #
     # Helpers

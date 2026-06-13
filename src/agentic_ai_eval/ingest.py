@@ -5,7 +5,7 @@ Three input shapes are supported:
   * A Mermaid flowchart (``graph TD; user --> router; router --> rag; ...``).
   * Already-structured JSON/YAML matching SystemSpec (loaded directly).
 
-Online (ANTHROPIC_API_KEY set) we ask Claude to extract a SystemSpec with
+Online (any provider key set) we ask the model to extract a SystemSpec with
 structured outputs. Offline we fall back to a deterministic heuristic parser so
 the pipeline always produces *something* usable — diagrams parse exactly, and
 prose is keyword-mapped to component types.

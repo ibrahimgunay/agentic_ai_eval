@@ -10,7 +10,8 @@ from __future__ import annotations
 from ..schema import EvalCase, Trace
 
 # Rough blended price ($ per 1M tokens) for back-of-envelope cost estimates.
-# Defaults track Claude Opus 4.8 list pricing; override per deployment.
+# Defaults sit in the range of current frontier models; override per deployment
+# via the `input_price` / `output_price` arguments to `estimated_cost_usd`.
 _INPUT_PRICE_PER_MTOK = 5.0
 _OUTPUT_PRICE_PER_MTOK = 25.0
 

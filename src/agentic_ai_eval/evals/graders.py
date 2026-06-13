@@ -14,24 +14,10 @@ from __future__ import annotations
 import json
 import re
 
-from pydantic import BaseModel, Field
-
 from ..llm import LLMClient
 from ..schema import EvalCase, Grader, GraderKind, GraderResult, Trace
 from . import metrics
-
-
-class _JudgeVerdict(BaseModel):
-    score: float = Field(ge=0.0, le=1.0, description="0..1 quality score against the rubric.")
-    passed: bool
-    rationale: str = ""
-
-
-_JUDGE_SYSTEM = """You are a rigorous, calibrated evaluation judge. Score the \
-system's output against the rubric on a 0..1 scale, where 1.0 fully satisfies \
-the rubric and 0.0 fails it. Be strict and specific; reward correctness and \
-faithfulness to any provided context, penalize unsupported claims. Return a \
-score, a pass/fail decision, and a one- to two-sentence rationale."""
+from .judge import judge as run_jury
 
 
 def grade(grader: Grader, case: EvalCase, trace: Trace, *, client: LLMClient | None = None) -> GraderResult:
@@ -51,16 +37,30 @@ def grade(grader: Grader, case: EvalCase, trace: Trace, *, client: LLMClient | N
         return _numeric_threshold(grader, case, trace)
     if kind == GraderKind.LLM_JUDGE:
         return _llm_judge(grader, case, trace, client or LLMClient())
+    if kind == GraderKind.HUMAN:
+        return _human_pending(grader)
     raise ValueError(f"Unknown grader kind: {kind}")
 
 
-def _result(grader: Grader, score: float, passed: bool, rationale: str) -> GraderResult:
+def _result(
+    grader: Grader,
+    score: float,
+    passed: bool,
+    rationale: str,
+    *,
+    source: str = "auto",
+    uncertainty: float | None = None,
+    pending: bool = False,
+) -> GraderResult:
     return GraderResult(
         kind=grader.kind,
         score=max(0.0, min(1.0, score)),
         weight=grader.weight,
         passed=passed,
         rationale=rationale,
+        source=source,
+        uncertainty=uncertainty,
+        pending=pending,
     )
 
 
@@ -139,38 +139,45 @@ def _numeric_threshold(grader: Grader, case: EvalCase, trace: Trace) -> GraderRe
 
 
 def _llm_judge(grader: Grader, case: EvalCase, trace: Trace, client: LLMClient) -> GraderResult:
-    if not client.online:
-        # Neutral, explicitly-labeled stub so offline runs still complete.
-        return _result(grader, 0.5, True, "[offline] llm_judge stub — set ANTHROPIC_API_KEY for real grading")
-
-    user = _judge_prompt(grader.rubric, case, trace)
-    verdict = client.parse(
-        schema=_JudgeVerdict,
-        system=_JUDGE_SYSTEM,
-        user=user,
-        model=client.judge_model,
-        max_tokens=2000,
+    verdict = run_jury(
+        grader.rubric,
+        case,
+        trace,
+        client,
+        jury_size=grader.jury_size,
+        jury_models=grader.jury_models,
     )
-    return _result(grader, verdict.score, verdict.passed, verdict.rationale or "judged")
+    source = "offline_stub" if not client.online else ("jury" if verdict.n_jurors > 1 else "auto")
+    return _result(
+        grader,
+        verdict.score,
+        verdict.passed,
+        verdict.rationale or "judged",
+        source=source,
+        uncertainty=verdict.uncertainty,
+    )
 
 
-def _judge_prompt(rubric: str, case: EvalCase, trace: Trace) -> str:
-    parts = [f"RUBRIC:\n{rubric or 'Is the output correct and helpful for the input?'}", ""]
-    parts.append(f"INPUT:\n{case.input}")
-    if case.context:
-        parts.append(f"\nPROVIDED CONTEXT (output must be grounded in this):\n{case.context}")
-    if case.reference:
-        parts.append(f"\nREFERENCE / GOLD ANSWER:\n{case.reference}")
-    parts.append(f"\nSYSTEM OUTPUT:\n{trace.output}")
-    if trace.tool_calls:
-        parts.append(f"\nTOOL CALLS MADE: {trace.tool_calls}")
-    return "\n".join(parts)
+def _human_pending(grader: Grader) -> GraderResult:
+    """Placeholder result for a human grader before a reviewer has weighed in.
+
+    Scored neutrally and flagged ``pending`` so the runner can surface it in the
+    review queue; once a human verdict is imported it replaces this result.
+    """
+    return _result(
+        grader,
+        0.5,
+        True,
+        "[pending human review] export the queue, collect a verdict, then re-import",
+        source="human",
+        pending=True,
+    )
 
 
-def _json_type_ok(value, json_type: str | None) -> bool:
+def _json_type_ok(value: object, json_type: str | None) -> bool:
     if json_type is None:
         return True
-    mapping = {
+    mapping: dict[str, type | tuple[type, ...]] = {
         "string": str,
         "integer": int,
         "number": (int, float),

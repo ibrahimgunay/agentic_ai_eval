@@ -4,29 +4,46 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentic-ai-eval"
-version = "0.1.0"
-description = "A world-class evaluation pipeline for agentic AI features: understand the system, generate evals, and scaffold code from a description, sketch, or diagram."
+version = "0.2.0"
+description = "Research-grade, provider-agnostic evaluation pipeline for agentic AI features: understand the system, generate evals, grade with a calibrated jury + humans, and trend results over SQL."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Ibrahim Gunay" }]
-keywords = ["evals", "agents", "llm", "anthropic", "claude", "evaluation", "ai-safety"]
+keywords = [
+    "evals", "evaluation", "agents", "agentic-ai", "llm", "llm-as-judge",
+    "openai", "anthropic", "gemini", "ai-safety", "human-in-the-loop", "mlops",
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "License :: OSI Approved :: Apache Software License",
 ]
 
+# Core has no vendor SDK: the package runs fully offline out of the box.
+# Install a provider extra to go online (or several — they coexist).
 dependencies = [
     "pydantic>=2.6",
-    "anthropic>=0.40",
     "typer>=0.12",
     "rich>=13.7",
     "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
+anthropic = ["anthropic>=0.40"]
+openai = ["openai>=1.40"]
+gemini = ["google-generativeai>=0.8"]
+server = ["fastapi>=0.110", "uvicorn>=0.29"]
+all = [
+    "anthropic>=0.40",
+    "openai>=1.40",
+    "google-generativeai>=0.8",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
@@ -58,3 +75,13 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.mypy]
+python_version = "3.10"
+warn_unused_ignores = false
+
+# Optional provider/server SDKs are imported lazily behind try/except; they are
+# not installed in the lint environment and have no bundled stubs.
+[[tool.mypy.overrides]]
+module = ["openai", "google.*", "fastapi", "uvicorn", "anthropic"]
+ignore_missing_imports = true

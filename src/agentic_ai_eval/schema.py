@@ -68,7 +68,8 @@ class EvalDimension(str, Enum):
 
 
 class GraderKind(str, Enum):
-    LLM_JUDGE = "llm_judge"        # rubric-scored by a model
+    LLM_JUDGE = "llm_judge"        # rubric-scored by a model (optionally a jury)
+    HUMAN = "human"               # scored by a human reviewer (HITL queue)
     EXACT_MATCH = "exact_match"
     CONTAINS = "contains"
     REGEX = "regex"
@@ -164,7 +165,7 @@ class SystemAnalysis(BaseModel):
 class Grader(BaseModel):
     kind: GraderKind
     # Free-form config interpreted by the grader implementation in evals/graders.py
-    rubric: str = ""                      # LLM_JUDGE
+    rubric: str = ""                      # LLM_JUDGE / HUMAN
     expected: str | None = None           # EXACT_MATCH / CONTAINS / REGEX
     pattern: str | None = None            # REGEX
     json_schema: dict | None = None       # JSON_SCHEMA
@@ -173,6 +174,11 @@ class Grader(BaseModel):
     threshold: float | None = None
     direction: str = "gte"                # "gte" | "lte" for NUMERIC_THRESHOLD
     weight: float = 1.0
+    # LLM_JUDGE jury controls. jury_size>1 samples multiple independent verdicts
+    # (self-consistency); jury_models ensembles across models to cut single-model
+    # bias. Both surface an uncertainty estimate on the GraderResult.
+    jury_size: int = 1
+    jury_models: list[str] | None = None
 
 
 class EvalCase(BaseModel):
@@ -239,6 +245,11 @@ class GraderResult(BaseModel):
     weight: float = 1.0
     passed: bool
     rationale: str = ""
+    source: str = Field(default="auto", description="auto | offline_stub | human | jury.")
+    uncertainty: float | None = Field(
+        default=None, description="Std-dev across jurors/reviewers, if measured.")
+    pending: bool = Field(
+        default=False, description="True if awaiting a human verdict (HITL).")
 
 
 class CaseResult(BaseModel):
@@ -256,6 +267,9 @@ class EvalResult(BaseModel):
     passed: bool
     pass_threshold: float
     case_results: list[CaseResult] = Field(default_factory=list)
+    # 95% bootstrap CI on the mean score, populated by the runner.
+    ci_low: float | None = None
+    ci_high: float | None = None
 
     @property
     def num_cases(self) -> int:
@@ -265,6 +279,12 @@ class EvalResult(BaseModel):
     def num_passed(self) -> int:
         return sum(1 for c in self.case_results if c.passed)
 
+    @property
+    def has_pending_review(self) -> bool:
+        return any(
+            g.pending for c in self.case_results for g in c.grader_results
+        )
+
 
 class EvalReport(BaseModel):
     spec_name: str
@@ -273,9 +293,24 @@ class EvalReport(BaseModel):
     results: list[EvalResult] = Field(default_factory=list)
     analysis: SystemAnalysis | None = None
     created_at: datetime = Field(default_factory=_utcnow)
+    # Reproducibility metadata: who graded this, and how.
+    provider: str | None = None
+    model: str | None = None
+    ci_low: float | None = None
+    ci_high: float | None = None
 
     def by_dimension(self) -> dict[str, float]:
         agg: dict[str, list[float]] = {}
         for r in self.results:
             agg.setdefault(r.dimension.value, []).append(r.score)
         return {k: sum(v) / len(v) for k, v in agg.items()}
+
+    @property
+    def num_pending_review(self) -> int:
+        return sum(
+            1
+            for r in self.results
+            for c in r.case_results
+            for g in c.grader_results
+            if g.pending
+        )

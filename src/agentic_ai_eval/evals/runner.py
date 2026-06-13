@@ -23,11 +23,23 @@ from ..schema import (
     SystemAnalysis,
     Trace,
 )
+from ..stats import mean_ci
 from . import graders as grader_mod
 
 # A TraceProvider maps a case id -> Trace. This is the seam where a team plugs
 # in their actual agent. Anything callable with the same shape works.
 TraceProvider = Callable[[str], Trace] | Mapping[str, Trace]
+
+
+def materialize_traces(suite: EvalSuite, traces: TraceProvider | None = None) -> dict[str, Trace]:
+    """Resolve a trace for every case id in the suite into a plain dict.
+
+    Handy for persisting exactly what was graded (so a human review queue can
+    show the real outputs) and for re-running graders without re-running the
+    agent.
+    """
+    get_trace = _normalize_provider(traces)
+    return {case.id: get_trace(case.id) for ev in suite.evals for case in ev.cases}
 
 
 def run_suite(
@@ -45,12 +57,17 @@ def run_suite(
         results.append(_run_eval(ev, get_trace, client))
 
     overall = _weighted_overall(results)
+    overall_ci = mean_ci([r.score for r in results]) if results else None
     return EvalReport(
         spec_name=suite.spec_name,
         overall_score=overall,
         passed=all(r.passed for r in results) if results else False,
         results=results,
         analysis=analysis,
+        provider=client.provider_name,
+        model=client.model,
+        ci_low=overall_ci.low if overall_ci else None,
+        ci_high=overall_ci.high if overall_ci else None,
     )
 
 
@@ -73,6 +90,7 @@ def _run_eval(ev: Eval, get_trace: Callable[[str], Trace], client: LLMClient) ->
         )
 
     eval_score = sum(c.score for c in case_results) / len(case_results) if case_results else 0.0
+    ci = mean_ci([c.score for c in case_results]) if case_results else None
     return EvalResult(
         eval_id=ev.id,
         target_component=ev.target_component,
@@ -81,6 +99,8 @@ def _run_eval(ev: Eval, get_trace: Callable[[str], Trace], client: LLMClient) ->
         passed=eval_score >= ev.pass_threshold,
         pass_threshold=ev.pass_threshold,
         case_results=case_results,
+        ci_low=ci.low if ci else None,
+        ci_high=ci.high if ci else None,
     )
 
 

@@ -27,8 +27,18 @@ def render_markdown(report: EvalReport) -> str:
     verdict = "✅ PASS" if report.passed else "❌ FAIL"
     lines.append(f"# Eval Report — {report.spec_name}")
     lines.append("")
-    lines.append(f"**Verdict:** {verdict}  |  **Overall score:** {report.overall_score:.2f}")
-    lines.append(f"_Generated {report.created_at.isoformat()}_")
+    ci = ""
+    if report.ci_low is not None and report.ci_high is not None:
+        ci = f" _(95% CI [{report.ci_low:.2f}, {report.ci_high:.2f}])_"
+    lines.append(f"**Verdict:** {verdict}  |  **Overall score:** {report.overall_score:.2f}{ci}")
+    grader = f"{report.provider or 'offline'} · {report.model or '—'}"
+    lines.append(f"_Generated {report.created_at.isoformat()} · grader: {grader}_")
+    if report.num_pending_review:
+        lines.append("")
+        lines.append(
+            f"> ⏳ **{report.num_pending_review} case(s) awaiting human review.** "
+            "Export the queue with `agentic-eval review export`."
+        )
     lines.append("")
 
     # Per-dimension scorecard

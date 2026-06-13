@@ -25,7 +25,16 @@ runs/
 *.eval.json
 generated/
 
+# Results store + review queues
+*.db
+*.sqlite
+*.sqlite3
+review_queue.*
+
 # Editors / OS
 .vscode/
 .idea/
 .DS_Store
+
+# CI workflow pushed separately (token lacks workflow scope)
+.github/workflows/

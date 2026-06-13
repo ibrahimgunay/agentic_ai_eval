@@ -13,13 +13,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .analyze import analyze
-from .evals import generate_suite, run_suite
+from .evals import generate_suite, materialize_traces, run_suite
 from .evals.runner import TraceProvider
 from .ingest import ingest
 from .llm import LLMClient
 from .report import render_json, render_markdown
 from .scaffold import scaffold
-from .schema import EvalReport, EvalSuite, SystemAnalysis, SystemSpec
+from .schema import EvalReport, EvalSuite, SystemAnalysis, SystemSpec, Trace
 
 
 @dataclass
@@ -29,6 +29,7 @@ class PipelineArtifacts:
     suite: EvalSuite
     report: EvalReport | None = None
     scaffold_files: dict[str, str] = field(default_factory=dict)
+    traces: dict[str, Trace] = field(default_factory=dict)
 
 
 class Pipeline:
@@ -52,12 +53,14 @@ class Pipeline:
         analysis = analyze(spec, client=self.client)
         suite = generate_suite(spec, analysis, client=self.client, cases_per_eval=cases_per_eval)
 
-        report = run_suite(suite, traces, client=self.client, analysis=analysis)
+        materialized = materialize_traces(suite, traces)
+        report = run_suite(suite, materialized, client=self.client, analysis=analysis)
 
         files = scaffold(spec, client=self.client) if generate_code else {}
 
         return PipelineArtifacts(
-            spec=spec, analysis=analysis, suite=suite, report=report, scaffold_files=files
+            spec=spec, analysis=analysis, suite=suite, report=report,
+            scaffold_files=files, traces=materialized,
         )
 
     def write_artifacts(self, artifacts: PipelineArtifacts, out_dir: str | Path) -> Path:
@@ -71,6 +74,11 @@ class Pipeline:
         if artifacts.report is not None:
             (out / "report.json").write_text(render_json(artifacts.report))
             (out / "report.md").write_text(render_markdown(artifacts.report))
+
+        if artifacts.traces:
+            (out / "traces.json").write_text(
+                json.dumps({k: v.model_dump() for k, v in artifacts.traces.items()}, indent=2, default=str)
+            )
 
         if artifacts.scaffold_files:
             gen = out / "generated"
@@ -86,7 +94,9 @@ class Pipeline:
                     "analysis": "analysis.json",
                     "suite": "suite.json",
                     "report": "report.md" if artifacts.report else None,
+                    "traces": "traces.json" if artifacts.traces else None,
                     "generated": sorted(artifacts.scaffold_files) or None,
+                    "provider": self.client.provider_name,
                     "online_mode": self.online,
                 },
                 indent=2,

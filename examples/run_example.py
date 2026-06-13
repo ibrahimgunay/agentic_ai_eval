@@ -1,7 +1,8 @@
 """Run the full pipeline on the example support agent and print the report.
 
-Works fully offline (deterministic). Set ANTHROPIC_API_KEY for LLM-backed
-ingestion, analysis, case generation, and judging.
+Works fully offline (deterministic). Set any provider key — ANTHROPIC_API_KEY,
+OPENAI_API_KEY, or GOOGLE_API_KEY — for LLM-backed ingestion, analysis, case
+generation, and judging.
 
     python examples/run_example.py
 """
@@ -21,7 +22,8 @@ def main() -> None:
     description = (HERE / "customer_support_agent.md").read_text()
 
     pipe = Pipeline()
-    print(f"Mode: {'ONLINE (Claude)' if pipe.online else 'OFFLINE (deterministic)'}\n")
+    mode = f"ONLINE ({pipe.client.provider_name})" if pipe.online else "OFFLINE (deterministic)"
+    print(f"Mode: {mode}\n")
 
     artifacts = pipe.run(description, name="customer-support-agent")
 
