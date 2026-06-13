@@ -1,0 +1,9 @@
+graph TD
+    user["User message"] --> router["Intent router"]
+    router --> memory["Conversation memory"]
+    memory --> retriever["RAG retriever (help-center docs)"]
+    retriever --> planner["Action planner"]
+    planner --> tools["Tool executor (lookup_order, issue_refund)"]
+    tools --> guardrail["Policy guardrail"]
+    guardrail --> formatter["JSON output formatter"]
+    formatter --> generation["Response generation"]
